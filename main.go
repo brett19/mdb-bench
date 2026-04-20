@@ -251,7 +251,9 @@ func runInsertBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config)
 		latencies[i] = time.Since(opStart)
 
 		if err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[INSERT] Error (op %d): %v", i, err)
+			}
 		}
 	})
 	elapsed := time.Since(start)
@@ -291,7 +293,9 @@ func runGetBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) Be
 		latencies[i] = time.Since(opStart)
 
 		if err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[GET] Error (op %d, id %s): %v", i, id, err)
+			}
 		}
 	})
 	elapsed := time.Since(start)
@@ -334,7 +338,9 @@ func runFindFilterBenchmark(ctx context.Context, coll *mongo.Collection, cfg Con
 		opStart := time.Now()
 		cursor, err := coll.Find(ctx, filter)
 		if err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[FIND_FILTER] Find error (op %d): %v", i, err)
+			}
 			latencies[i] = time.Since(opStart)
 			return
 		}
@@ -342,7 +348,9 @@ func runFindFilterBenchmark(ctx context.Context, coll *mongo.Collection, cfg Con
 		// Drain the cursor to measure full round-trip.
 		var docs []bson.M
 		if err := cursor.All(ctx, &docs); err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[FIND_FILTER] Cursor error (op %d): %v", i, err)
+			}
 		}
 		latencies[i] = time.Since(opStart)
 	})
@@ -388,14 +396,18 @@ func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Confi
 		opStart := time.Now()
 		cursor, err := coll.Find(ctx, filter, opts)
 		if err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[FIND_SORT] Find error (op %d): %v", i, err)
+			}
 			latencies[i] = time.Since(opStart)
 			return
 		}
 
 		var docs []bson.M
 		if err := cursor.All(ctx, &docs); err != nil {
-			atomic.AddInt64(&errCount, 1)
+			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+				log.Printf("[FIND_SORT] Cursor error (op %d): %v", i, err)
+			}
 		}
 		latencies[i] = time.Since(opStart)
 	})
