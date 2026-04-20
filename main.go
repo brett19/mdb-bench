@@ -91,6 +91,7 @@ type Config struct {
 	DocSizeBytes int
 	Benchmarks   string
 	CleanupFirst bool
+	NoIndexes    bool
 }
 
 func parseConfig() Config {
@@ -103,6 +104,7 @@ func parseConfig() Config {
 	flag.IntVar(&cfg.DocSizeBytes, "docsize", 256, "Approximate document payload size in bytes")
 	flag.StringVar(&cfg.Benchmarks, "benchmarks", "all", "Comma-separated list of benchmarks to run: insert,get,find_filter,find_sort (or 'all')")
 	flag.BoolVar(&cfg.CleanupFirst, "cleanup", true, "Drop collection before running benchmarks")
+	flag.BoolVar(&cfg.NoIndexes, "no-indexes", false, "Skip index creation for find benchmarks")
 	flag.Parse()
 	return cfg
 }
@@ -145,6 +147,11 @@ func main() {
 	if cfg.CleanupFirst {
 		log.Printf("Dropping collection %s.%s...", cfg.Database, cfg.Collection)
 		_ = coll.Drop(ctx)
+	}
+
+	// Create indexes to support find queries.
+	if !cfg.NoIndexes {
+		ensureIndexes(ctx, coll)
 	}
 
 	// Determine which benchmarks to run.
@@ -408,6 +415,31 @@ func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Confi
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
+
+// ensureIndexes creates indexes needed to support the find benchmarks.
+func ensureIndexes(ctx context.Context, coll *mongo.Collection) {
+	log.Printf("Creating indexes...")
+
+	indexes := []mongo.IndexModel{
+		{
+			// Supports find_filter benchmark (filter by category).
+			Keys: bson.D{{Key: "category", Value: 1}},
+		},
+		{
+			// Supports find_sort benchmark (filter by category, sort by score desc).
+			Keys: bson.D{
+				{Key: "category", Value: 1},
+				{Key: "score", Value: -1},
+			},
+		},
+	}
+
+	names, err := coll.Indexes().CreateMany(ctx, indexes)
+	if err != nil {
+		log.Fatalf("Failed to create indexes: %v", err)
+	}
+	log.Printf("Created indexes: %v", names)
+}
 
 // ensureDocuments checks if the collection has enough documents, seeding if needed.
 func ensureDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) {
