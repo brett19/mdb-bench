@@ -102,7 +102,7 @@ func parseConfig() Config {
 	flag.IntVar(&cfg.NumOps, "ops", 10000, "Number of operations per benchmark")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 1, "Number of concurrent workers")
 	flag.IntVar(&cfg.DocSizeBytes, "docsize", 256, "Approximate document payload size in bytes")
-	flag.StringVar(&cfg.Benchmarks, "benchmarks", "all", "Comma-separated list of benchmarks to run: insert,get,find_filter,find_sort (or 'all')")
+	flag.StringVar(&cfg.Benchmarks, "benchmarks", "all", "Comma-separated list of benchmarks to run: insert,get,find_filter,find_sort,range_scan (or 'all')")
 	flag.BoolVar(&cfg.CleanupFirst, "cleanup", true, "Drop collection before running benchmarks")
 	flag.BoolVar(&cfg.NoIndexes, "no-indexes", false, "Skip index creation for find benchmarks")
 	flag.Parse()
@@ -179,6 +179,11 @@ func main() {
 		results = append(results, r)
 	}
 
+	if benchmarks["range_scan"] {
+		r := runRangeScanBenchmark(ctx, coll, cfg)
+		results = append(results, r)
+	}
+
 	// Print summary.
 	printResults(results)
 }
@@ -189,6 +194,7 @@ func parseBenchmarkList(input string) map[string]bool {
 		"get":         false,
 		"find_filter": false,
 		"find_sort":   false,
+		"range_scan":  false,
 	}
 	if input == "all" {
 		for k := range all {
@@ -201,7 +207,7 @@ func parseBenchmarkList(input string) map[string]bool {
 		if _, ok := all[b]; ok {
 			all[b] = true
 		} else {
-			log.Fatalf("Unknown benchmark: %q (valid: insert, get, find_filter, find_sort)", b)
+			log.Fatalf("Unknown benchmark: %q (valid: insert, get, find_filter, find_sort, range_scan)", b)
 		}
 	}
 	return all
@@ -421,6 +427,79 @@ func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Confi
 		Errors:     errCount,
 	}
 	log.Printf("[FIND_SORT] Completed in %v (%.0f ops/sec, %d errors)", elapsed, r.OpsPerSec(), errCount)
+	return r
+}
+
+// --------------------------------------------------------------------------
+// Benchmark: Range Scan (Mixed: 95% range scan, 5% update)
+// --------------------------------------------------------------------------
+
+func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
+	ensureDocuments(ctx, coll, cfg)
+
+	numOps := cfg.NumOps / 10
+	if numOps < 100 {
+		numOps = 100
+	}
+
+	log.Printf("[RANGE_SCAN] Starting %d range-scan-limit operations (5%% updates) with concurrency %d...", numOps, cfg.Concurrency)
+
+	latencies := make([]time.Duration, numOps)
+	var errCount int64
+
+	start := time.Now()
+	runConcurrent(numOps, cfg.Concurrency, func(i int) {
+		opStart := time.Now()
+		// 5% of operations are pure updates.
+		if rand.Float64() < 0.05 {
+			// Update operation
+			id := docID(rand.Intn(cfg.NumOps))
+			filter := bson.D{{Key: "_id", Value: id}}
+			update := bson.D{{Key: "$set", Value: bson.D{{Key: "score", Value: rand.Float64() * 1000}}}}
+
+			_, err := coll.UpdateOne(ctx, filter, update)
+			latencies[i] = time.Since(opStart)
+
+			if err != nil {
+				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+					log.Printf("[RANGE_SCAN] Update error (op %d, id %s): %v", i, id, err)
+				}
+			}
+		} else {
+			// Range scan operation
+			id := docID(rand.Intn(cfg.NumOps))
+			filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: id}}}}
+			opts := options.Find().SetLimit(50)
+
+			cursor, err := coll.Find(ctx, filter, opts)
+			if err != nil {
+				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+					log.Printf("[RANGE_SCAN] Find error (op %d, id %s): %v", i, id, err)
+				}
+				latencies[i] = time.Since(opStart)
+				return
+			}
+
+			// Drain cursor
+			var docs []bson.M
+			if err := cursor.All(ctx, &docs); err != nil {
+				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
+					log.Printf("[RANGE_SCAN] Cursor error (op %d): %v", i, err)
+				}
+			}
+			latencies[i] = time.Since(opStart)
+		}
+	})
+	elapsed := time.Since(start)
+
+	r := BenchmarkResult{
+		Name:       "Range Scan (Mixed)",
+		Operations: numOps,
+		Duration:   elapsed,
+		Latencies:  latencies,
+		Errors:     errCount,
+	}
+	log.Printf("[RANGE_SCAN] Completed in %v (%.0f ops/sec, %d errors)", elapsed, r.OpsPerSec(), errCount)
 	return r
 }
 

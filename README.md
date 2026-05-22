@@ -10,6 +10,7 @@ A lightweight MongoDB benchmarking tool written in Go. Designed to measure laten
 | `get` | `FindOne` by `_id` | Fetches a single document by primary key — exercises the KV fast-path |
 | `find_filter` | `Find` with equality filter | Queries documents by a `category` field and drains the cursor |
 | `find_sort` | `Find` with sort + limit | Queries by category, sorts by `score` descending, limits to 10 results |
+| `range_scan` | Range scan with limit + Mixed update | Range scan on `_id` field ($gt random ID) limited to 50 documents, with 5% pure update operations |
 
 Each benchmark reports:
 - **Throughput** — operations per second
@@ -46,7 +47,7 @@ mdb-bench [flags]
 | `-ops` | `10000` | Number of operations per benchmark |
 | `-concurrency` | `1` | Number of concurrent workers |
 | `-docsize` | `256` | Approximate document payload size in bytes |
-| `-benchmarks` | `all` | Comma-separated list: `insert`, `get`, `find_filter`, `find_sort` |
+| `-benchmarks` | `all` | Comma-separated list: `insert`, `get`, `find_filter`, `find_sort`, `range_scan` |
 | `-cleanup` | `true` | Drop collection before running benchmarks |
 
 ### Examples
@@ -108,9 +109,11 @@ mdb-bench -conn "mongodb://localhost:27018" -ops 20000 -concurrency 4
 
 3. **Find benchmarks** query by the `category` field (100 distinct values across the dataset) and drain all results. The sort variant adds a descending sort on `score` with a limit of 10.
 
-4. **Concurrency** is implemented with a worker pool. Each worker pulls operation indices from a shared channel, ensuring even distribution.
+4. **Range scan benchmark** performs a range scan on `_id` using a `$gt` filter with a random document ID as the starting point and limits the result to 50. In this benchmark, 5% of operations executed are randomly chosen to be pure update operations on randomly selected documents (updating their score).
 
-5. **Auto-seeding** — if the get or find benchmarks run without a prior insert, the tool automatically seeds the collection using batched `InsertMany` calls.
+5. **Concurrency** is implemented with a worker pool. Each worker pulls operation indices from a shared channel, ensuring even distribution.
+
+6. **Auto-seeding** — if the get, find, or range scan benchmarks run without a prior insert, the tool automatically seeds the collection using batched `InsertMany` calls.
 
 ## Document Schema
 
