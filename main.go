@@ -164,6 +164,12 @@ func main() {
 		results = append(results, r)
 	}
 
+	if benchmarks["get"] || benchmarks["find_filter"] || benchmarks["find_sort"] || benchmarks["range_scan"] {
+		if seedRes := ensureDocuments(ctx, coll, cfg); seedRes != nil {
+			results = append(results, *seedRes)
+		}
+	}
+
 	if benchmarks["get"] {
 		r := runGetBenchmark(ctx, coll, cfg)
 		results = append(results, r)
@@ -280,9 +286,6 @@ func runInsertBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config)
 // --------------------------------------------------------------------------
 
 func runGetBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
-	// Ensure documents exist from a prior insert benchmark or seed them.
-	ensureDocuments(ctx, coll, cfg)
-
 	log.Printf("[GET] Starting %d findOne-by-_id operations with concurrency %d...", cfg.NumOps, cfg.Concurrency)
 
 	latencies := make([]time.Duration, cfg.NumOps)
@@ -322,8 +325,6 @@ func runGetBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) Be
 // --------------------------------------------------------------------------
 
 func runFindFilterBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
-	ensureDocuments(ctx, coll, cfg)
-
 	// For find benchmarks we use fewer iterations since each is heavier.
 	numOps := cfg.NumOps / 10
 	if numOps < 100 {
@@ -378,8 +379,6 @@ func runFindFilterBenchmark(ctx context.Context, coll *mongo.Collection, cfg Con
 // --------------------------------------------------------------------------
 
 func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
-	ensureDocuments(ctx, coll, cfg)
-
 	numOps := cfg.NumOps / 10
 	if numOps < 100 {
 		numOps = 100
@@ -435,8 +434,6 @@ func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Confi
 // --------------------------------------------------------------------------
 
 func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
-	ensureDocuments(ctx, coll, cfg)
-
 	numOps := cfg.NumOps / 10
 	if numOps < 100 {
 		numOps = 100
@@ -533,12 +530,21 @@ func ensureIndexes(ctx context.Context, coll *mongo.Collection) {
 }
 
 // ensureDocuments checks if the collection has enough documents, seeding if needed.
-func ensureDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) {
+func ensureDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) *BenchmarkResult {
 	count, err := coll.CountDocuments(ctx, bson.D{})
 	if err != nil || count < int64(cfg.NumOps) {
 		log.Printf("  Seeding %d documents for benchmark...", cfg.NumOps)
+		start := time.Now()
 		seedDocuments(ctx, coll, cfg)
+		elapsed := time.Since(start)
+		log.Printf("  Seeding completed in %v", elapsed)
+		return &BenchmarkResult{
+			Name:       "Seeding",
+			Operations: cfg.NumOps,
+			Duration:   elapsed,
+		}
 	}
+	return nil
 }
 
 func seedDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) {
@@ -565,7 +571,7 @@ func seedDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) {
 			})
 		}
 
-		_, err := coll.InsertMany(ctx, docs)
+		_, err := coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
 		if err != nil {
 			// Documents may already exist if we're re-seeding.
 			// Ignore duplicate key errors and continue.
