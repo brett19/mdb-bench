@@ -157,17 +157,20 @@ func main() {
 	// Determine which benchmarks to run.
 	benchmarks := parseBenchmarkList(cfg.Benchmarks)
 
+	// If any read-dependent benchmark is requested, ensure the "insert" benchmark is also run
+	// since it now acts as our document seeding step.
+	if benchmarks["get"] || benchmarks["find_filter"] || benchmarks["find_sort"] || benchmarks["range_scan"] {
+		if !benchmarks["insert"] {
+			log.Printf("Read benchmark requested; automatically enabling 'insert' benchmark as the document seeding step.")
+			benchmarks["insert"] = true
+		}
+	}
+
 	var results []BenchmarkResult
 
 	if benchmarks["insert"] {
 		r := runInsertBenchmark(ctx, coll, cfg)
 		results = append(results, r)
-	}
-
-	if benchmarks["get"] || benchmarks["find_filter"] || benchmarks["find_sort"] || benchmarks["range_scan"] {
-		if seedRes := ensureDocuments(ctx, coll, cfg); seedRes != nil {
-			results = append(results, *seedRes)
-		}
 	}
 
 	if benchmarks["get"] {
@@ -234,44 +237,55 @@ func docID(i int) string {
 }
 
 // --------------------------------------------------------------------------
-// Benchmark: Insert (Set)
+// Benchmark: Insert (Batched)
 // --------------------------------------------------------------------------
 
 func runInsertBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
-	log.Printf("[INSERT] Starting %d insert operations with concurrency %d...", cfg.NumOps, cfg.Concurrency)
+	log.Printf("[INSERT] Starting %d insert operations (batched by 50) with concurrency %d...", cfg.NumOps, cfg.Concurrency)
 
-	latencies := make([]time.Duration, cfg.NumOps)
+	batchSize := 50
+	numBatches := (cfg.NumOps + batchSize - 1) / batchSize
+	latencies := make([]time.Duration, numBatches)
 	var errCount int64
 
 	start := time.Now()
-	runConcurrent(cfg.NumOps, cfg.Concurrency, func(i int) {
-		doc := bson.D{
-			{Key: "_id", Value: docID(i)},
-			{Key: "seq", Value: i},
-			{Key: "category", Value: fmt.Sprintf("cat-%d", i%100)},
-			{Key: "score", Value: rand.Float64() * 1000},
-			{Key: "payload", Value: generatePayload(cfg.DocSizeBytes)},
-			{Key: "tags", Value: bson.A{
-				fmt.Sprintf("tag-%d", i%10),
-				fmt.Sprintf("tag-%d", (i+1)%10),
-			}},
-			{Key: "created_at", Value: time.Now()},
+	runConcurrent(numBatches, cfg.Concurrency, func(batchIdx int) {
+		startIdx := batchIdx * batchSize
+		endIdx := startIdx + batchSize
+		if endIdx > cfg.NumOps {
+			endIdx = cfg.NumOps
+		}
+
+		var docs []interface{}
+		for j := startIdx; j < endIdx; j++ {
+			docs = append(docs, bson.D{
+				{Key: "_id", Value: docID(j)},
+				{Key: "seq", Value: j},
+				{Key: "category", Value: fmt.Sprintf("cat-%d", j%100)},
+				{Key: "score", Value: rand.Float64() * 1000},
+				{Key: "payload", Value: generatePayload(cfg.DocSizeBytes)},
+				{Key: "tags", Value: bson.A{
+					fmt.Sprintf("tag-%d", j%10),
+					fmt.Sprintf("tag-%d", (j+1)%10),
+				}},
+				{Key: "created_at", Value: time.Now()},
+			})
 		}
 
 		opStart := time.Now()
-		_, err := coll.InsertOne(ctx, doc)
-		latencies[i] = time.Since(opStart)
+		_, err := coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+		latencies[batchIdx] = time.Since(opStart)
 
 		if err != nil {
 			if n := atomic.AddInt64(&errCount, 1); n <= 10 {
-				log.Printf("[INSERT] Error (op %d): %v", i, err)
+				log.Printf("[INSERT] Error (batch %d): %v", batchIdx, err)
 			}
 		}
 	})
 	elapsed := time.Since(start)
 
 	result := BenchmarkResult{
-		Name:       "Insert (Set)",
+		Name:       "Insert (Batched)",
 		Operations: cfg.NumOps,
 		Duration:   elapsed,
 		Latencies:  latencies,
@@ -529,58 +543,7 @@ func ensureIndexes(ctx context.Context, coll *mongo.Collection) {
 	log.Printf("Created indexes: %v", names)
 }
 
-// ensureDocuments checks if the collection has enough documents, seeding if needed.
-func ensureDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) *BenchmarkResult {
-	count, err := coll.CountDocuments(ctx, bson.D{})
-	if err != nil || count < int64(cfg.NumOps) {
-		log.Printf("  Seeding %d documents for benchmark...", cfg.NumOps)
-		start := time.Now()
-		seedDocuments(ctx, coll, cfg)
-		elapsed := time.Since(start)
-		log.Printf("  Seeding completed in %v", elapsed)
-		return &BenchmarkResult{
-			Name:       "Seeding",
-			Operations: cfg.NumOps,
-			Duration:   elapsed,
-		}
-	}
-	return nil
-}
 
-func seedDocuments(ctx context.Context, coll *mongo.Collection, cfg Config) {
-	const batchSize = 500
-	for i := 0; i < cfg.NumOps; i += batchSize {
-		end := i + batchSize
-		if end > cfg.NumOps {
-			end = cfg.NumOps
-		}
-
-		var docs []interface{}
-		for j := i; j < end; j++ {
-			docs = append(docs, bson.D{
-				{Key: "_id", Value: docID(j)},
-				{Key: "seq", Value: j},
-				{Key: "category", Value: fmt.Sprintf("cat-%d", j%100)},
-				{Key: "score", Value: rand.Float64() * 1000},
-				{Key: "payload", Value: generatePayload(cfg.DocSizeBytes)},
-				{Key: "tags", Value: bson.A{
-					fmt.Sprintf("tag-%d", j%10),
-					fmt.Sprintf("tag-%d", (j+1)%10),
-				}},
-				{Key: "created_at", Value: time.Now()},
-			})
-		}
-
-		_, err := coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
-		if err != nil {
-			// Documents may already exist if we're re-seeding.
-			// Ignore duplicate key errors and continue.
-			if !mongo.IsDuplicateKeyError(err) {
-				log.Printf("  Warning: seed batch insert error: %v", err)
-			}
-		}
-	}
-}
 
 // runConcurrent distributes 'total' operations across 'concurrency' goroutines.
 func runConcurrent(total int, concurrency int, fn func(i int)) {

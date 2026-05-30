@@ -6,7 +6,7 @@ A lightweight MongoDB benchmarking tool written in Go. Designed to measure laten
 
 | Benchmark | Operation | Description |
 |---|---|---|
-| `insert` | `InsertOne` | Inserts documents with structured fields and a configurable payload size |
+| `insert` | `InsertMany` | Inserts documents in batches of 50 with structured fields and a configurable payload size |
 | `get` | `FindOne` by `_id` | Fetches a single document by primary key — exercises the KV fast-path |
 | `find_filter` | `Find` with equality filter | Queries documents by a `category` field and drains the cursor |
 | `find_sort` | `Find` with sort + limit | Queries by category, sorts by `score` descending, limits to 10 results |
@@ -95,7 +95,7 @@ mdb-bench -conn "mongodb://localhost:27018" -ops 20000 -concurrency 4
 
          BENCHMARK    OPS  DURATION  OPS/SEC  ERRORS      MIN      AVG      P50      P95      P99      MAX
          ---------    ---  --------  -------  ------      ---      ---      ---      ---      ---      ---
-      Insert (Set)  10000     4.2s     2381       0    312µs    420µs    398µs    687µs   1.2ms   4.1ms
+      Insert (Batched)  10000     4.2s     2381       0    312µs    420µs    398µs    687µs   1.2ms   4.1ms
   FindOne by _id    10000     2.1s     4762       0    148µs    210µs    195µs    382µs    712µs   3.8ms
   Find with Filter   1000     3.8s      263       0    1.2ms    3.8ms    3.1ms    8.2ms   12.4ms  28.1ms
   Find Sort+Limit    1000     2.9s      345       0    980µs    2.9ms    2.4ms    6.8ms   10.1ms  22.3ms
@@ -103,9 +103,9 @@ mdb-bench -conn "mongodb://localhost:27018" -ops 20000 -concurrency 4
 
 ## How It Works
 
-1. **Insert benchmark** writes documents containing an `_id`, `seq`, `category`, `score`, `payload`, `tags`, and `created_at` field. The `payload` is a random string of the configured size.
+1. **Insert benchmark** performs batched writes (in batches of 50 documents) containing an `_id`, `seq`, `category`, `score`, `payload`, `tags`, and `created_at` field. The `payload` is a random string of the configured size.
 
-2. **Get benchmark** performs `FindOne` lookups using random `_id` values from the inserted document set. If documents don't exist yet, they are auto-seeded before the benchmark starts.
+2. **Get benchmark** performs `FindOne` lookups using random `_id` values from the inserted document set. Since it depends on these documents, the **Insert benchmark** is automatically run first to seed the collection.
 
 3. **Find benchmarks** query by the `category` field (100 distinct values across the dataset) and drain all results. The sort variant adds a descending sort on `score` with a limit of 10.
 
@@ -113,7 +113,7 @@ mdb-bench -conn "mongodb://localhost:27018" -ops 20000 -concurrency 4
 
 5. **Concurrency** is implemented with a worker pool. Each worker pulls operation indices from a shared channel, ensuring even distribution.
 
-6. **Auto-seeding** — if the get, find, or range scan benchmarks run without a prior insert, the tool automatically seeds the collection using batched `InsertMany` calls.
+6. **Automatic Seeding via Insert Benchmark** — if any of the read-dependent benchmarks (`get`, `find_filter`, `find_sort`, or `range_scan`) are requested, the tool automatically enables and runs the `insert` benchmark first. This acts as the document seeding step, recording metrics for insertion performance as part of the overall results.
 
 ## Document Schema
 
