@@ -480,7 +480,8 @@ func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Conf
 			// Range scan operation
 			id := docID(rand.Intn(cfg.NumOps))
 			filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: id}}}}
-			opts := options.Find().SetLimit(50)
+			sort := bson.D{{Key: "_id", Value: 1}}
+			opts := options.Find().SetSort(sort).SetLimit(50)
 
 			cursor, err := coll.Find(ctx, filter, opts)
 			if err != nil {
@@ -542,8 +543,6 @@ func ensureIndexes(ctx context.Context, coll *mongo.Collection) {
 	}
 	log.Printf("Created indexes: %v", names)
 }
-
-
 
 // runConcurrent distributes 'total' operations across 'concurrency' goroutines.
 func runConcurrent(total int, concurrency int, fn func(i int)) {
