@@ -149,6 +149,13 @@ func main() {
 		_ = coll.Drop(ctx)
 	}
 
+	// Create collection
+	log.Printf("Creating collection %s.%s...", cfg.Database, cfg.Collection)
+	err = client.Database(cfg.Database).CreateCollection(ctx, cfg.Collection)
+	if err != nil {
+		log.Fatalf("Failed to create collection: %v", err)
+	}
+
 	// Create indexes to support find queries.
 	if !cfg.NoIndexes {
 		ensureIndexes(ctx, coll)
