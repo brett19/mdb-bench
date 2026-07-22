@@ -180,6 +180,13 @@ func main() {
 		results = append(results, r)
 	}
 
+	err = client.Database(cfg.Database).RunCommand(ctx, map[string]interface{}{
+		"_rosettacacheschema": cfg.Collection,
+	}).Err()
+	if err != nil {
+		log.Printf("Failed to cache rosetta schema (expected on mongo): %v", err)
+	}
+
 	if benchmarks["get"] {
 		r := runGetBenchmark(ctx, coll, cfg)
 		results = append(results, r)
