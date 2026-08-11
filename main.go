@@ -102,7 +102,7 @@ func parseConfig() Config {
 	flag.IntVar(&cfg.NumOps, "ops", 10000, "Number of operations per benchmark")
 	flag.IntVar(&cfg.Concurrency, "concurrency", 1, "Number of concurrent workers")
 	flag.IntVar(&cfg.DocSizeBytes, "docsize", 256, "Approximate document payload size in bytes")
-	flag.StringVar(&cfg.Benchmarks, "benchmarks", "all", "Comma-separated list of benchmarks to run: insert,get,find_filter,find_sort,range_scan (or 'all')")
+	flag.StringVar(&cfg.Benchmarks, "benchmarks", "all", "Comma-separated list of benchmarks to run: insert,get,find_filter,find_sort,range_scan_id,range_scan (or 'all')")
 	flag.BoolVar(&cfg.CleanupFirst, "cleanup", true, "Drop collection before running benchmarks")
 	flag.BoolVar(&cfg.NoIndexes, "no-indexes", false, "Skip index creation for find benchmarks")
 	flag.Parse()
@@ -166,7 +166,8 @@ func main() {
 
 	// If any read-dependent benchmark is requested, ensure the "insert" benchmark is also run
 	// since it now acts as our document seeding step.
-	if benchmarks["get"] || benchmarks["find_filter"] || benchmarks["find_sort"] || benchmarks["range_scan"] {
+	if benchmarks["get"] || benchmarks["find_filter"] || benchmarks["find_sort"] ||
+		benchmarks["range_scan_id"] || benchmarks["range_scan"] {
 		if !benchmarks["insert"] {
 			log.Printf("Read benchmark requested; automatically enabling 'insert' benchmark as the document seeding step.")
 			benchmarks["insert"] = true
@@ -202,8 +203,13 @@ func main() {
 		results = append(results, r)
 	}
 
+	if benchmarks["range_scan_id"] {
+		r := runRangeScanBenchmark(ctx, coll, cfg, idRangeScan)
+		results = append(results, r)
+	}
+
 	if benchmarks["range_scan"] {
-		r := runRangeScanBenchmark(ctx, coll, cfg)
+		r := runRangeScanBenchmark(ctx, coll, cfg, fieldRangeScan)
 		results = append(results, r)
 	}
 
@@ -213,11 +219,12 @@ func main() {
 
 func parseBenchmarkList(input string) map[string]bool {
 	all := map[string]bool{
-		"insert":      false,
-		"get":         false,
-		"find_filter": false,
-		"find_sort":   false,
-		"range_scan":  false,
+		"insert":        false,
+		"get":           false,
+		"find_filter":   false,
+		"find_sort":     false,
+		"range_scan_id": false,
+		"range_scan":    false,
 	}
 	if input == "all" {
 		for k := range all {
@@ -230,7 +237,7 @@ func parseBenchmarkList(input string) map[string]bool {
 		if _, ok := all[b]; ok {
 			all[b] = true
 		} else {
-			log.Fatalf("Unknown benchmark: %q (valid: insert, get, find_filter, find_sort, range_scan)", b)
+			log.Fatalf("Unknown benchmark: %q (valid: insert, get, find_filter, find_sort, range_scan_id, range_scan)", b)
 		}
 	}
 	return all
@@ -274,6 +281,11 @@ func runInsertBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config)
 		for j := startIdx; j < endIdx; j++ {
 			docs = append(docs, bson.D{
 				{Key: "_id", Value: docID(j)},
+				// "a" deliberately holds the same value as _id, so the two
+				// range-scan benchmarks walk identical data and any difference
+				// between them is the difference between the _id index and an
+				// ordinary secondary index.
+				{Key: "a", Value: docID(j)},
 				{Key: "seq", Value: j},
 				{Key: "category", Value: fmt.Sprintf("cat-%d", j%100)},
 				{Key: "score", Value: rand.Float64() * 1000},
@@ -459,15 +471,43 @@ func runFindSortBenchmark(ctx context.Context, coll *mongo.Collection, cfg Confi
 
 // --------------------------------------------------------------------------
 // Benchmark: Range Scan (Mixed: 95% range scan, 5% update)
+//
+// Two benchmarks share this body, differing only in which field they walk.
+// Every document carries the same value in _id and in "a", so the operations
+// are identical and the comparison isolates the field: _id is the special case
+// (a server may have a dedicated index for it, and a point lookup by _id can
+// bypass the query path entirely), where "a" is an ordinary indexed field.
 // --------------------------------------------------------------------------
 
-func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config) BenchmarkResult {
+// rangeScanSpec is the field one range-scan benchmark operates on, plus the
+// names it reports under.
+type rangeScanSpec struct {
+	field string // the field both the scan and the update leg address
+	tag   string // log prefix
+	label string // results-table name
+}
+
+var (
+	idRangeScan = rangeScanSpec{
+		field: "_id",
+		tag:   "RANGE_SCAN_ID",
+		label: "Range Scan by _id (Mixed)",
+	}
+	fieldRangeScan = rangeScanSpec{
+		field: "a",
+		tag:   "RANGE_SCAN",
+		label: "Range Scan by field (Mixed)",
+	}
+)
+
+func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Config, spec rangeScanSpec) BenchmarkResult {
 	numOps := cfg.NumOps / 10
 	if numOps < 100 {
 		numOps = 100
 	}
 
-	log.Printf("[RANGE_SCAN] Starting %d range-scan-limit operations (5%% updates) with concurrency %d...", numOps, cfg.Concurrency)
+	log.Printf("[%s] Starting %d range-scan-limit operations on %q (5%% updates) with concurrency %d...",
+		spec.tag, numOps, spec.field, cfg.Concurrency)
 
 	latencies := make([]time.Duration, numOps)
 	var errCount int64
@@ -479,7 +519,7 @@ func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Conf
 		if rand.Float64() < 0.05 {
 			// Update operation
 			id := docID(rand.Intn(cfg.NumOps))
-			filter := bson.D{{Key: "_id", Value: id}}
+			filter := bson.D{{Key: spec.field, Value: id}}
 			update := bson.D{{Key: "$set", Value: bson.D{{Key: "score", Value: rand.Float64() * 1000}}}}
 
 			_, err := coll.UpdateOne(ctx, filter, update)
@@ -487,20 +527,20 @@ func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Conf
 
 			if err != nil {
 				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
-					log.Printf("[RANGE_SCAN] Update error (op %d, id %s): %v", i, id, err)
+					log.Printf("[%s] Update error (op %d, id %s): %v", spec.tag, i, id, err)
 				}
 			}
 		} else {
 			// Range scan operation
 			id := docID(rand.Intn(cfg.NumOps))
-			filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: id}}}}
-			sort := bson.D{{Key: "_id", Value: 1}}
+			filter := bson.D{{Key: spec.field, Value: bson.D{{Key: "$gt", Value: id}}}}
+			sort := bson.D{{Key: spec.field, Value: 1}}
 			opts := options.Find().SetSort(sort).SetLimit(50)
 
 			cursor, err := coll.Find(ctx, filter, opts)
 			if err != nil {
 				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
-					log.Printf("[RANGE_SCAN] Find error (op %d, id %s): %v", i, id, err)
+					log.Printf("[%s] Find error (op %d, id %s): %v", spec.tag, i, id, err)
 				}
 				latencies[i] = time.Since(opStart)
 				return
@@ -510,7 +550,7 @@ func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Conf
 			var docs []bson.M
 			if err := cursor.All(ctx, &docs); err != nil {
 				if n := atomic.AddInt64(&errCount, 1); n <= 10 {
-					log.Printf("[RANGE_SCAN] Cursor error (op %d): %v", i, err)
+					log.Printf("[%s] Cursor error (op %d): %v", spec.tag, i, err)
 				}
 			}
 			latencies[i] = time.Since(opStart)
@@ -519,13 +559,13 @@ func runRangeScanBenchmark(ctx context.Context, coll *mongo.Collection, cfg Conf
 	elapsed := time.Since(start)
 
 	r := BenchmarkResult{
-		Name:       "Range Scan (Mixed)",
+		Name:       spec.label,
 		Operations: numOps,
 		Duration:   elapsed,
 		Latencies:  latencies,
 		Errors:     errCount,
 	}
-	log.Printf("[RANGE_SCAN] Completed in %v (%.0f ops/sec, %d errors)", elapsed, r.OpsPerSec(), errCount)
+	log.Printf("[%s] Completed in %v (%.0f ops/sec, %d errors)", spec.tag, elapsed, r.OpsPerSec(), errCount)
 	return r
 }
 
@@ -548,6 +588,12 @@ func ensureIndexes(ctx context.Context, coll *mongo.Collection) {
 				{Key: "category", Value: 1},
 				{Key: "score", Value: -1},
 			},
+		},
+		{
+			// Supports the range_scan benchmark. It is the ordinary-field
+			// counterpart of the _id index range_scan_id gets for free, and
+			// without it that benchmark measures a collection scan instead.
+			Keys: bson.D{{Key: "a", Value: 1}},
 		},
 	}
 

@@ -10,7 +10,13 @@ A lightweight MongoDB benchmarking tool written in Go. Designed to measure laten
 | `get` | `FindOne` by `_id` | Fetches a single document by primary key — exercises the KV fast-path |
 | `find_filter` | `Find` with equality filter | Queries documents by a `category` field and drains the cursor |
 | `find_sort` | `Find` with sort + limit | Queries by category, sorts by `score` descending, limits to 10 results |
-| `range_scan` | Range scan with limit + Mixed update | Range scan on `_id` field ($gt random ID) limited to 50 documents, with 5% pure update operations |
+| `range_scan_id` | Range scan with limit + Mixed update | Range scan on the `_id` field ($gt random ID) limited to 50 documents, with 5% pure update operations |
+| `range_scan` | Range scan with limit + Mixed update | The same operation on the ordinary indexed field `a`, which holds the same value as `_id` in every document |
+
+`range_scan_id` and `range_scan` are one benchmark over two fields that always
+hold the same value, so the difference between them is the difference between
+`_id` and an ordinary indexed field — a server may index `_id` specially, and
+may serve a point lookup by `_id` without going through its query path at all.
 
 Each benchmark reports:
 - **Throughput** — operations per second
@@ -47,7 +53,7 @@ mdb-bench [flags]
 | `-ops` | `10000` | Number of operations per benchmark |
 | `-concurrency` | `1` | Number of concurrent workers |
 | `-docsize` | `256` | Approximate document payload size in bytes |
-| `-benchmarks` | `all` | Comma-separated list: `insert`, `get`, `find_filter`, `find_sort`, `range_scan` |
+| `-benchmarks` | `all` | Comma-separated list: `insert`, `get`, `find_filter`, `find_sort`, `range_scan_id`, `range_scan` |
 | `-cleanup` | `true` | Drop collection before running benchmarks |
 
 ### Examples
@@ -103,17 +109,17 @@ mdb-bench -conn "mongodb://localhost:27018" -ops 20000 -concurrency 4
 
 ## How It Works
 
-1. **Insert benchmark** performs batched writes (in batches of 50 documents) containing an `_id`, `seq`, `category`, `score`, `payload`, `tags`, and `created_at` field. The `payload` is a random string of the configured size.
+1. **Insert benchmark** performs batched writes (in batches of 50 documents) containing an `_id`, `a`, `seq`, `category`, `score`, `payload`, `tags`, and `created_at` field. The `payload` is a random string of the configured size. `a` is a copy of `_id`, and exists so the two range-scan benchmarks walk identical data.
 
 2. **Get benchmark** performs `FindOne` lookups using random `_id` values from the inserted document set. Since it depends on these documents, the **Insert benchmark** is automatically run first to seed the collection.
 
 3. **Find benchmarks** query by the `category` field (100 distinct values across the dataset) and drain all results. The sort variant adds a descending sort on `score` with a limit of 10.
 
-4. **Range scan benchmark** performs a range scan on `_id` using a `$gt` filter with a random document ID as the starting point and limits the result to 50. In this benchmark, 5% of operations executed are randomly chosen to be pure update operations on randomly selected documents (updating their score).
+4. **Range scan benchmarks** perform a range scan using a `$gt` filter with a random document ID as the starting point, sorted ascending and limited to 50. In these benchmarks, 5% of operations executed are randomly chosen to be pure update operations on randomly selected documents (updating their score); the update addresses the same field the scan does. `range_scan_id` uses `_id`; `range_scan` uses `a`, which carries the same value and is indexed by `ensureIndexes` — without that index the benchmark would measure a collection scan rather than an indexed one.
 
 5. **Concurrency** is implemented with a worker pool. Each worker pulls operation indices from a shared channel, ensuring even distribution.
 
-6. **Automatic Seeding via Insert Benchmark** — if any of the read-dependent benchmarks (`get`, `find_filter`, `find_sort`, or `range_scan`) are requested, the tool automatically enables and runs the `insert` benchmark first. This acts as the document seeding step, recording metrics for insertion performance as part of the overall results.
+6. **Automatic Seeding via Insert Benchmark** — if any of the read-dependent benchmarks (`get`, `find_filter`, `find_sort`, `range_scan_id`, or `range_scan`) are requested, the tool automatically enables and runs the `insert` benchmark first. This acts as the document seeding step, recording metrics for insertion performance as part of the overall results.
 
 ## Document Schema
 
@@ -122,6 +128,7 @@ Each benchmarked document has the following shape:
 ```json
 {
   "_id": "bench-doc-00000042",
+  "a": "bench-doc-00000042",
   "seq": 42,
   "category": "cat-42",
   "score": 723.156,
